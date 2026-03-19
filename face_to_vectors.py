@@ -286,9 +286,10 @@ def roberts_edge(image: np.ndarray, thresh: Optional[float] = None) -> np.ndarra
         # Heuristic threshold based on the mean of non-zero gradients
         non_zero = magnitude[magnitude > 0]
         if len(non_zero) > 0:
-            thresh = float(np.mean(non_zero)) * 1.5
+            # Increased threshold multiplier to 2.5 to drop weak noisy edges (like skin texture)
+            thresh = float(np.mean(non_zero)) * 2.5
         else:
-            thresh = 30.0
+            thresh = 40.0
             
     # Thresholding
     _, binary_edges = cv2.threshold(magnitude, thresh, 255, cv2.THRESH_BINARY)
@@ -296,18 +297,15 @@ def roberts_edge(image: np.ndarray, thresh: Optional[float] = None) -> np.ndarra
 
 
 def make_line_art_binary(face_bgr: np.ndarray, region_mask: np.ndarray) -> np.ndarray:
-    # 1. Bilateral filter removes skin texture but preserves strong structural edges
-    blur_bgr = cv2.bilateralFilter(face_bgr, d=9, sigmaColor=75, sigmaSpace=75)
+    # 1. Bilateral filter removes skin texture but preserves strong structural edges.
+    blur_bgr = face_bgr.copy()
+    for _ in range(3):
+        blur_bgr = cv2.bilateralFilter(blur_bgr, d=11, sigmaColor=100, sigmaSpace=100)
     
-    # 2. Convert to HSV for Uniqcoda's thresholding
+    # 2. Convert to HSV for skin thresholding
     hsv = cv2.cvtColor(blur_bgr, cv2.COLOR_BGR2HSV)
     
-    # MATLAB: hueThreshold = 0.08 (x 180 for OpenCV ≈ 14.4)
-    # MATLAB: saturationThreshold = 0.2 (x 255 for OpenCV ≈ 51)
-    # In the MATLAB script, it accepts H < 0.08 and S > 0.2
-    
     # Define bounds in OpenCV HSV format (H: 0-179, S: 0-255, V: 0-255)
-    # Note: Red/skin tones often wrap around 0 in Hue, so we check 0-14 and 165-179
     lower_hsv1 = np.array([0, 51, 0])
     upper_hsv1 = np.array([14, 255, 255])
     
@@ -321,26 +319,35 @@ def make_line_art_binary(face_bgr: np.ndarray, region_mask: np.ndarray) -> np.nd
     # 3. Combine with original region mask (focus + grabcut)
     final_mask = cv2.bitwise_and(skin_mask, region_mask)
     
-    # 4. Extract clean edges on the skin region using Roberts Cross on the Red channel
-    red_channel = blur_bgr[:, :, 2] # BGR format: Red is index 2
-    im_face = cv2.bitwise_and(red_channel, red_channel, mask=final_mask)
+    # 4. Extract Face Outline (Silhouette) using Roberts Cross
+    gray_blur = cv2.cvtColor(blur_bgr, cv2.COLOR_BGR2GRAY)
+    im_face = cv2.bitwise_and(gray_blur, gray_blur, mask=final_mask)
+    outline_edges = roberts_edge(im_face, thresh=30.0)
     
-    # 5. Apply Roberts Cross edge detection
-    combined = roberts_edge(im_face)
+    # 5. Extract Internal Features (Eyes, Nose, Lips) using a "Sketch" effect!
+    # A block adaptive threshold works incredibly well for portrait drawing.
+    gray_original = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
+    gray_light_blur = cv2.medianBlur(gray_original, 5)  # remove sensor noise only
     
-    # 6. Glue the shattered vector lines together so the arm doesn't lift as much
-    # Dilation thickens the lines, bridging small gaps.
-    kernel_dilate = np.ones((3, 3), np.uint8)
-    combined = cv2.dilate(combined, kernel_dilate, iterations=1)
+    # Adaptive threshold creates a pen-sketch effect mimicking lighting shadows
+    sketch = cv2.adaptiveThreshold(
+        gray_light_blur, 255,
+        cv2.ADAPTIVE_THRESH_MEAN_C,
+        cv2.THRESH_BINARY_INV,
+        blockSize=15, C=6
+    )
     
-    # Morphological closing fills in larger holes after dilation
-    kernel_close = np.ones((5, 5), np.uint8)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+    # Clean up the sketch slightly to remove tiny disconnected specks
+    sketch = cv2.morphologyEx(sketch, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
     
-    # Optional: skeletonize or thin it back down to a single pixel width so the arm
-    # doesn't try to draw the "outline" of a thick line, but `cv2.findContours` handles
-    # the outer edge of thick lines somewhat gracefully if epsilon is high.
+    # Erode the bounding mask heavily so the sketch doesn't overlap the silhouette boundary
+    eroded_mask = cv2.erode(final_mask, np.ones((13, 13), np.uint8), iterations=1)
+    internal_features = cv2.bitwise_and(sketch, sketch, mask=eroded_mask)
     
+    # 6. Combine Outline + Internal Features
+    combined = cv2.bitwise_or(outline_edges, internal_features)
+    
+    # Optional thinning or cleanup can happen here, but we leave it thin for extraction
     return combined
 
 
@@ -456,15 +463,15 @@ def extract_paths(
         if touches_border:
             continue
 
-        peri = cv2.arcLength(contour, closed=True)
+        peri = cv2.arcLength(contour, closed=False)
         if peri < min_contour_length:
             continue
         epsilon = max(0.5, epsilon_factor * peri)
-        approx = cv2.approxPolyDP(contour, epsilon, closed=True)
+        approx = cv2.approxPolyDP(contour, epsilon, closed=False)
         if len(approx) >= 2:
             kept.append(approx)
 
-    kept.sort(key=lambda c: cv2.arcLength(c, closed=True), reverse=True)
+    kept.sort(key=lambda c: cv2.arcLength(c, closed=False), reverse=True)
     return kept[:max_paths]
 
 
