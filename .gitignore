@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# Images / Output
+output/
+*.jpg
+*.png
+
+# Mac
+.DS_Store
+
+# Temp research repo
+temp_repo/
+.venv/
