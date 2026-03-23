@@ -85,8 +85,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-contour-length",
         type=float,
-        default=10.0,
-        help="Minimum contour perimeter in pixels to keep (default: 10.0).",
+        default=15.0,
+        help="Minimum contour perimeter in pixels to keep (default: 15.0).",
     )
     parser.add_argument(
         "--epsilon-factor",
@@ -327,14 +327,15 @@ def make_line_art_binary(face_bgr: np.ndarray, region_mask: np.ndarray) -> np.nd
     # 5. Extract Internal Features (Eyes, Nose, Lips) using a "Sketch" effect!
     # A block adaptive threshold works incredibly well for portrait drawing.
     gray_original = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
-    gray_light_blur = cv2.medianBlur(gray_original, 5)  # remove sensor noise only
+    gray_light_blur = cv2.medianBlur(gray_original, 5)  # balanced median blur to retain facial geometry
     
-    # Adaptive threshold creates a pen-sketch effect mimicking lighting shadows
+    # Adaptive threshold creates a pen-sketch effect mimicking lighting shadows.
+    # We strike a perfect balance here to keep the eyes/lips recognizable without overwhelming noise.
     sketch = cv2.adaptiveThreshold(
         gray_light_blur, 255,
         cv2.ADAPTIVE_THRESH_MEAN_C,
         cv2.THRESH_BINARY_INV,
-        blockSize=15, C=6
+        blockSize=21, C=8
     )
     
     # Clean up the sketch slightly to remove tiny disconnected specks
@@ -431,10 +432,10 @@ def extract_paths(
 
     kept: List[np.ndarray] = []
     for contour in contours:
-        area = cv2.contourArea(contour)
-        if area < min_contour_area:
-            continue
-
+        # Since we are drawing single-pixel wide open lines (not closed polygons),
+        # their contourArea is mathematically computed as 0.0. 
+        # We completely skip the area check and rely exclusively on min_contour_length.
+        
         if keep_mask is not None:
             moments = cv2.moments(contour)
             if moments["m00"] > 0.0:
