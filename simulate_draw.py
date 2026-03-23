@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -18,9 +20,20 @@ PointMM = Tuple[float, float]
 PathMM = List[PointMM]
 
 
+@dataclass
+class PathStats:
+    index: int
+    path: PathMM
+    length_mm: float
+    bbox_diag_mm: float
+    face_coverage: float
+    border_distance_mm: float
+    importance: float
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Render paths_mm.json into a simulated drawing image."
+        description="Render paths_mm.json into a simulated drawing image with optional face-focused filtering."
     )
     parser.add_argument(
         "--input",
@@ -63,16 +76,61 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show the rendered image in a window.",
     )
+    parser.add_argument(
+        "--no-filter",
+        action="store_true",
+        help="Disable the built-in path filter and render every vector path.",
+    )
+    parser.add_argument(
+        "--min-path-length-mm",
+        type=float,
+        default=14.0,
+        help="Drop very short paths below this length when they also have tiny spread (default: 14.0).",
+    )
+    parser.add_argument(
+        "--min-path-diagonal-mm",
+        type=float,
+        default=5.0,
+        help="Drop paths with a tiny bounding-box diagonal unless they are long enough (default: 5.0).",
+    )
+    parser.add_argument(
+        "--keep-length-ratio",
+        type=float,
+        default=0.88,
+        help="After scoring paths, keep enough of them to preserve this fraction of total pen-down length (default: 0.88).",
+    )
+    parser.add_argument(
+        "--min-keep-paths",
+        type=int,
+        default=7,
+        help="Always keep at least this many of the best paths after filtering (default: 7).",
+    )
+    parser.add_argument(
+        "--edge-margin-ratio",
+        type=float,
+        default=0.07,
+        help="Treat paths near the drawing bounds as likely noise when they sit outside the face region (default: 0.07).",
+    )
+    parser.add_argument(
+        "--filtered-json-output",
+        type=Path,
+        help="Optional path to save the filtered vector JSON for reuse outside the preview render.",
+    )
     return parser.parse_args()
 
 
-def load_paths(input_path: Path) -> Tuple[float, float, List[PathMM]]:
+def load_paths(input_path: Path) -> Tuple[float, float, Optional[Tuple[int, int]], List[PathMM]]:
     data = json.loads(input_path.read_text(encoding="utf-8"))
     paper = data.get("paper_mm", {})
     paper_w = float(paper.get("width", 0.0))
     paper_h = float(paper.get("height", 0.0))
     if paper_w <= 0.0 or paper_h <= 0.0:
         raise ValueError("Invalid or missing paper_mm width/height in JSON.")
+
+    source = data.get("source_px", {})
+    source_w = int(source.get("width", 0) or 0)
+    source_h = int(source.get("height", 0) or 0)
+    source_px = (source_w, source_h) if source_w > 0 and source_h > 0 else None
 
     raw_paths = data.get("paths", [])
     paths: List[PathMM] = []
@@ -84,7 +142,158 @@ def load_paths(input_path: Path) -> Tuple[float, float, List[PathMM]]:
             path.append((x, y))
         if len(path) >= 2:
             paths.append(path)
-    return paper_w, paper_h, paths
+    return paper_w, paper_h, source_px, paths
+
+
+def save_paths_json(
+    output_path: Path,
+    paper_w_mm: float,
+    paper_h_mm: float,
+    paths: List[PathMM],
+    source_px: Optional[Tuple[int, int]],
+) -> None:
+    payload = {
+        "paper_mm": {"width": paper_w_mm, "height": paper_h_mm},
+        "paths": [
+            [{"x_mm": round(x, 3), "y_mm": round(y, 3)} for x, y in path]
+            for path in paths
+        ],
+    }
+    if source_px is not None:
+        payload["source_px"] = {"width": source_px[0], "height": source_px[1]}
+    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def path_length_mm(path: PathMM) -> float:
+    return sum(
+        math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1])
+        for i in range(1, len(path))
+    )
+
+
+def path_bounds(path: PathMM) -> Tuple[float, float, float, float]:
+    xs = [pt[0] for pt in path]
+    ys = [pt[1] for pt in path]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def all_paths_bounds(paths: List[PathMM]) -> Tuple[float, float, float, float]:
+    mins_maxes = [path_bounds(path) for path in paths]
+    return (
+        min(bounds[0] for bounds in mins_maxes),
+        min(bounds[1] for bounds in mins_maxes),
+        max(bounds[2] for bounds in mins_maxes),
+        max(bounds[3] for bounds in mins_maxes),
+    )
+
+
+def ellipse_distance(
+    point: PointMM,
+    center: PointMM,
+    axes: PointMM,
+) -> float:
+    ax = max(axes[0], 1e-6)
+    ay = max(axes[1], 1e-6)
+    dx = (point[0] - center[0]) / ax
+    dy = (point[1] - center[1]) / ay
+    return math.hypot(dx, dy)
+
+
+def filter_paths(
+    paths: List[PathMM],
+    min_path_length_mm: float,
+    min_path_diagonal_mm: float,
+    keep_length_ratio: float,
+    min_keep_paths: int,
+    edge_margin_ratio: float,
+) -> Tuple[List[PathMM], int]:
+    if len(paths) <= 1:
+        return paths, 0
+
+    x0, y0, x1, y1 = all_paths_bounds(paths)
+    span_w = max(x1 - x0, 1.0)
+    span_h = max(y1 - y0, 1.0)
+    face_center = (x0 + span_w * 0.50, y0 + span_h * 0.56)
+    face_axes = (span_w * 0.43, span_h * 0.52)
+    edge_margin_mm = min(span_w, span_h) * max(edge_margin_ratio, 0.0)
+    edge_keep_length_mm = max(min_path_length_mm * 1.8, 0.18 * (span_w + span_h))
+
+    candidates: List[PathStats] = []
+    hard_dropped = 0
+    for index, path in enumerate(paths):
+        min_x, min_y, max_x, max_y = path_bounds(path)
+        bbox_diag_mm = math.hypot(max_x - min_x, max_y - min_y)
+        length_mm = path_length_mm(path)
+        face_coverage = float(
+            np.mean(
+                [
+                    ellipse_distance(point, face_center, face_axes) <= 1.0
+                    for point in path
+                ]
+            )
+        )
+        centroid = (
+            sum(point[0] for point in path) / len(path),
+            sum(point[1] for point in path) / len(path),
+        )
+        center_distance = ellipse_distance(centroid, face_center, face_axes)
+        centrality = max(0.0, 1.0 - min(center_distance, 1.6) / 1.6)
+        border_distance_mm = min(min_x - x0, x1 - max_x, min_y - y0, y1 - max_y)
+
+        is_tiny = length_mm < min_path_length_mm and bbox_diag_mm < min_path_diagonal_mm
+        is_edge_noise = (
+            border_distance_mm < edge_margin_mm
+            and face_coverage < 0.35
+            and length_mm < edge_keep_length_mm
+        )
+        if is_tiny or is_edge_noise:
+            hard_dropped += 1
+            continue
+
+        importance = (
+            length_mm * (0.78 + 0.52 * face_coverage)
+            + bbox_diag_mm * (0.40 + 0.80 * centrality)
+        )
+        candidates.append(
+            PathStats(
+                index=index,
+                path=path,
+                length_mm=length_mm,
+                bbox_diag_mm=bbox_diag_mm,
+                face_coverage=face_coverage,
+                border_distance_mm=border_distance_mm,
+                importance=importance,
+            )
+        )
+
+    if not candidates:
+        fallback = sorted(
+            enumerate(paths),
+            key=lambda item: path_length_mm(item[1]),
+            reverse=True,
+        )
+        keep_count = min(len(fallback), max(1, min_keep_paths))
+        kept = [path for _, path in sorted(fallback[:keep_count], key=lambda item: item[0])]
+        return kept, len(paths) - len(kept)
+
+    ranked = sorted(candidates, key=lambda stats: stats.importance, reverse=True)
+    total_length_mm = sum(stats.length_mm for stats in ranked)
+    target_length_mm = total_length_mm * min(max(keep_length_ratio, 0.0), 1.0)
+    top_importance = ranked[0].importance
+
+    kept_indexes: Set[int] = set()
+    kept_length_mm = 0.0
+    for position, stats in enumerate(ranked):
+        must_keep = position < max(min_keep_paths, 1)
+        high_value = stats.importance >= top_importance * 0.52
+        if must_keep or kept_length_mm < target_length_mm or high_value:
+            kept_indexes.add(stats.index)
+            kept_length_mm += stats.length_mm
+        else:
+            break
+
+    kept_paths = [path for index, path in enumerate(paths) if index in kept_indexes]
+    return kept_paths, len(paths) - len(kept_paths)
 
 
 def map_mm_to_px(
@@ -138,7 +347,7 @@ def draw_paths(
             cv2.line(image, pts_px[i - 1], pts_px[i], color=(0, 0, 0), thickness=line_width)
             dx = path[i][0] - path[i - 1][0]
             dy = path[i][1] - path[i - 1][1]
-            length_mm += (dx * dx + dy * dy) ** 0.5
+            length_mm += math.hypot(dx, dy)
             segment_count += 1
     return segment_count, length_mm
 
@@ -150,8 +359,24 @@ def main() -> None:
         raise ValueError("Canvas width/height must be positive.")
     if args.line_width <= 0:
         raise ValueError("Line width must be positive.")
+    if args.min_path_length_mm < 0.0 or args.min_path_diagonal_mm < 0.0:
+        raise ValueError("Path filtering thresholds must be non-negative.")
+    if args.min_keep_paths < 1:
+        raise ValueError("min-keep-paths must be at least 1.")
 
-    paper_w_mm, paper_h_mm, paths = load_paths(args.input)
+    paper_w_mm, paper_h_mm, source_px, paths = load_paths(args.input)
+    original_path_count = len(paths)
+    dropped_paths = 0
+    if not args.no_filter:
+        paths, dropped_paths = filter_paths(
+            paths=paths,
+            min_path_length_mm=args.min_path_length_mm,
+            min_path_diagonal_mm=args.min_path_diagonal_mm,
+            keep_length_ratio=args.keep_length_ratio,
+            min_keep_paths=args.min_keep_paths,
+            edge_margin_ratio=args.edge_margin_ratio,
+        )
+
     canvas = np.full((args.canvas_height, args.canvas_width, 3), 255, dtype=np.uint8)
 
     segment_count, length_mm = draw_paths(
@@ -165,11 +390,22 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(args.output), canvas)
+    if args.filtered_json_output is not None:
+        args.filtered_json_output.parent.mkdir(parents=True, exist_ok=True)
+        save_paths_json(args.filtered_json_output, paper_w_mm, paper_h_mm, paths, source_px)
 
+    print(f"Input paths: {original_path_count}")
+    if args.no_filter:
+        print("Path filter: disabled")
+    else:
+        print(f"Filtered paths kept: {len(paths)}")
+        print(f"Filtered paths dropped: {dropped_paths}")
     print(f"Rendered paths: {len(paths)}")
     print(f"Rendered segments: {segment_count}")
     print(f"Total pen-down length (mm): {length_mm:.2f}")
     print(f"Saved simulated drawing: {args.output}")
+    if args.filtered_json_output is not None:
+        print(f"Saved filtered JSON: {args.filtered_json_output}")
 
     if args.show:
         cv2.imshow("Simulated Draw", canvas)
