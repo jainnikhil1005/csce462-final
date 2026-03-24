@@ -114,9 +114,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--trace-mode",
-        choices=("outline", "detailed", "landmarks"),
+        choices=("outline", "detailed", "landmarks", "cartoon"),
         default="detailed",
-        help="Tracing strategy: outline, detailed, or landmarks (MediaPipe Face Mesh). Default: detailed.",
+        help="Tracing strategy: outline, detailed, cartoon, or landmarks (MediaPipe Face Mesh). Default: detailed.",
     )
 
     return parser.parse_args()
@@ -470,7 +470,8 @@ def make_line_art_binary(
     grayimg = cv2.medianBlur(grayimg, 5)
 
     # 2. Get the edges (DinjanAI uses THRESH_BINARY, making edges black and background white)
-    edges = cv2.adaptiveThreshold(grayimg, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 5, 5)
+    # We increase blockSize (5 -> 11) and lower C (5 -> 3) so it traces softer, broader shadows (nose/mouth)
+    edges = cv2.adaptiveThreshold(grayimg, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, 3)
 
     # 3. Convert to a cartoon version (heavy bilateral filter + black edges)
     # DinjanAI parameters: 9, 250, 250
@@ -805,15 +806,21 @@ def main() -> None:
             epsilon_factor=args.epsilon_factor,
             border_margin=args.border_margin,
         )
-    elif args.trace_mode == "detailed":
+    elif args.trace_mode in ("detailed", "cartoon"):
         binary = make_line_art_binary(face_bgr, region_mask, feature_mask, outdir)
         contours = extract_paths(
             binary=binary,
             min_contour_area=args.min_contour_area,
-            min_contour_length=args.min_contour_length,
-            epsilon_factor=args.epsilon_factor,
+            min_contour_length=max(
+                10.0,
+                args.min_contour_length * (0.75 if args.trace_mode == "cartoon" else 1.0),
+            ),
+            epsilon_factor=max(
+                0.0018,
+                args.epsilon_factor * (0.82 if args.trace_mode == "cartoon" else 1.0),
+            ),
             border_margin=args.border_margin,
-            max_paths=args.max_paths,
+            max_paths=min(args.max_paths, 650) if args.trace_mode == "cartoon" else args.max_paths,
             keep_mask=keep_mask,
             priority_mask=feature_mask,
         )

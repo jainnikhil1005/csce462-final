@@ -38,6 +38,14 @@ Detailed tracing (eyes/nose/lips + more interior lines):
 
 `detailed` now biases extraction toward eyes, brows, nose, and mouth so the portrait keeps more of the structure that affects likeness.
 
+Cartoon tracing based on the DinjanAI/Image_to_Cartoon OpenCV pipeline:
+
+```bash
+./.venv/bin/python face_to_vectors.py --outdir output --trace-mode cartoon
+```
+
+This mode first cartoonizes the webcam photo with adaptive-threshold edges plus bilateral smoothing, then extracts vectors from that cleaned portrait.
+
 Landmark tracing with MediaPipe Face Mesh (best likeness when the dependency is installed):
 
 ```bash
@@ -55,6 +63,7 @@ If you run `landmarks` on macOS and see an OpenGL initialization error, run it f
 - `output/region_mask.png`: combined mask used for edge extraction
 - `output/feature_mask.png`: eyes/nose/mouth priority mask used to preserve facial structure
 - `output/keep_mask.png`: stricter mask used for contour filtering
+- `output/cartoon_face.png`: cartoonized face image used by `--trace-mode cartoon`
 - `output/line_art_binary.png`: threshold/edge map used for contour extraction
 - `output/vector_overlay.png`: extracted contours overlay
 
@@ -86,7 +95,7 @@ Save the cleaned vector set for reuse:
 ## Useful tuning flags
 
 - `--paper-width-mm`, `--paper-height-mm`: target drawing area
-- `--trace-mode`: `outline` (silhouette) or `detailed` (internal features)
+- `--trace-mode`: `outline` (silhouette), `detailed` (internal features), or `cartoon` (DinjanAI-style cartoon preprocessing)
 - `--trace-mode landmarks`: use MediaPipe facial landmarks for more face-accurate contours
 - `--min-contour-area`, `--min-contour-length`: remove tiny/noisy paths
 - `--epsilon-factor`: contour simplification amount
