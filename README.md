@@ -12,47 +12,32 @@ source .venv/bin/activate
 
 ## Run
 
-Webcam capture:
+Recommended webcam command:
 
 ```bash
-./.venv/bin/python face_to_vectors.py --outdir output --show-preview
+python face_to_vectors.py \
+  --outdir output \
+  --trace-mode cartoon \
+  --show-preview
 ```
 
-Use an existing image:
+This is the default workflow for the project right now: capture from webcam, apply the DinjanAI/Image_to_Cartoon preprocessing, and preview the extracted vectors immediately.
+
+Use an existing image instead of the webcam:
 
 ```bash
-./.venv/bin/python face_to_vectors.py --input my_face.jpg --outdir output
+python face_to_vectors.py --input my_face.jpg --outdir output --trace-mode cartoon
 ```
 
-Outline-only tracing (recommended for robotic portrait silhouette):
+Other trace modes:
 
 ```bash
-./.venv/bin/python face_to_vectors.py --outdir output --trace-mode outline
+python face_to_vectors.py --outdir output --trace-mode outline
 ```
 
-Detailed tracing (eyes/nose/lips + more interior lines):
-
-```bash
-./.venv/bin/python face_to_vectors.py --outdir output --trace-mode detailed
-```
-
-`detailed` now biases extraction toward eyes, brows, nose, and mouth so the portrait keeps more of the structure that affects likeness.
-
-Cartoon tracing based on the DinjanAI/Image_to_Cartoon OpenCV pipeline:
-
-```bash
-./.venv/bin/python face_to_vectors.py --outdir output --trace-mode cartoon
-```
-
-This mode first cartoonizes the webcam photo with adaptive-threshold edges plus bilateral smoothing, then extracts vectors from that cleaned portrait.
-
-Landmark tracing with MediaPipe Face Mesh (best likeness when the dependency is installed):
-
-```bash
-./.venv/bin/python face_to_vectors.py --outdir output --trace-mode landmarks
-```
-
-If you run `landmarks` on macOS and see an OpenGL initialization error, run it from a normal desktop terminal session instead of a headless shell.
+- `detailed`: more internal facial lines, biased toward eyes, brows, nose, and mouth
+- `landmarks`: MediaPipe Face Mesh contours, when that dependency initializes correctly on your machine
+- `outline`: mostly silhouette / outer face shape
 
 ## Main outputs
 

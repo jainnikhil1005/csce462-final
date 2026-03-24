@@ -323,7 +323,6 @@ def build_feature_mask(
         255,
         -1,
     )
-
     eye_cascade_path = cv2.data.haarcascades + "haarcascade_eye_tree_eyeglasses.xml"
     eye_detector = cv2.CascadeClassifier(eye_cascade_path)
     if not eye_detector.empty():
@@ -484,9 +483,9 @@ def make_line_art_binary(
 
     # For vector tracing, the robotic arm needs the edges to be WHITE (255), so we invert it!
     edges_inv = cv2.bitwise_not(edges)
-    
-    # We apply the trace to the entire face region rather than just the tiny heuristic eye/nose ellipses 
-    # Because DinjanAI filtering is smooth, we actually WANT to trace the hair, beard, and jawline it finds!
+
+    # We apply the trace to the entire face region rather than just the tiny heuristic eye/nose ellipses
+    # because the cartoon filtering can also produce useful hair, beard, and jawline contours.
     sketch = cv2.bitwise_and(edges_inv, edges_inv, mask=region_mask)
     
     # We remove max_area limit here so huge connected structures (like your hair/beard shadows) aren't deleted!
@@ -808,6 +807,13 @@ def main() -> None:
         )
     elif args.trace_mode in ("detailed", "cartoon"):
         binary = make_line_art_binary(face_bgr, region_mask, feature_mask, outdir)
+        if args.trace_mode == "cartoon":
+            binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+            binary = filter_binary_components(
+                binary,
+                min_area=max(8, face_bgr.shape[0] // 48),
+                max_area=None,
+            )
         contours = extract_paths(
             binary=binary,
             min_contour_area=args.min_contour_area,
