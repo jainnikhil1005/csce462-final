@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
@@ -113,9 +114,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--trace-mode",
-        choices=("outline", "detailed"),
+        choices=("outline", "detailed", "landmarks"),
         default="detailed",
-        help="Tracing strategy: outline (face silhouette) or detailed (internal facial lines). Default: detailed.",
+        help="Tracing strategy: outline, detailed, or landmarks (MediaPipe Face Mesh). Default: detailed.",
     )
 
     return parser.parse_args()
@@ -266,6 +267,104 @@ def build_foreground_mask(
     return fg
 
 
+def build_feature_mask(
+    face_bgr: np.ndarray,
+    face_bbox: Optional[Tuple[int, int, int, int]],
+) -> np.ndarray:
+    h, w = face_bgr.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+
+    if face_bbox is not None:
+        x, y, fw, fh = face_bbox
+    else:
+        fw = int(w * 0.62)
+        fh = int(h * 0.78)
+        x = (w - fw) // 2
+        y = int(h * 0.10)
+
+    # Heuristic facial zones so we preserve structures that drive likeness.
+    cv2.ellipse(
+        mask,
+        (int(x + fw * 0.30), int(y + fh * 0.37)),
+        (max(10, int(fw * 0.15)), max(8, int(fh * 0.08))),
+        0,
+        0,
+        360,
+        255,
+        -1,
+    )
+    cv2.ellipse(
+        mask,
+        (int(x + fw * 0.70), int(y + fh * 0.37)),
+        (max(10, int(fw * 0.15)), max(8, int(fh * 0.08))),
+        0,
+        0,
+        360,
+        255,
+        -1,
+    )
+    cv2.ellipse(
+        mask,
+        (int(x + fw * 0.50), int(y + fh * 0.56)),
+        (max(8, int(fw * 0.08)), max(14, int(fh * 0.16))),
+        0,
+        0,
+        360,
+        255,
+        -1,
+    )
+    cv2.ellipse(
+        mask,
+        (int(x + fw * 0.50), int(y + fh * 0.76)),
+        (max(12, int(fw * 0.20)), max(8, int(fh * 0.09))),
+        0,
+        0,
+        360,
+        255,
+        -1,
+    )
+
+    eye_cascade_path = cv2.data.haarcascades + "haarcascade_eye_tree_eyeglasses.xml"
+    eye_detector = cv2.CascadeClassifier(eye_cascade_path)
+    if not eye_detector.empty():
+        gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
+        roi_y0 = max(0, y + int(fh * 0.14))
+        roi_y1 = min(h, y + int(fh * 0.56))
+        roi_x0 = max(0, x)
+        roi_x1 = min(w, x + fw)
+        if roi_x1 - roi_x0 > 24 and roi_y1 - roi_y0 > 24:
+            roi = gray[roi_y0:roi_y1, roi_x0:roi_x1]
+            detections = eye_detector.detectMultiScale(
+                roi,
+                scaleFactor=1.08,
+                minNeighbors=8,
+                minSize=(max(18, fw // 10), max(12, fh // 14)),
+            )
+            eyes = sorted(detections, key=lambda e: e[2] * e[3], reverse=True)[:2]
+            for ex, ey, ew, eh in eyes:
+                cx = roi_x0 + ex + ew // 2
+                cy = roi_y0 + ey + eh // 2
+                cv2.ellipse(
+                    mask,
+                    (cx, cy),
+                    (max(10, int(ew * 0.75)), max(6, int(eh * 0.60))),
+                    0,
+                    0,
+                    360,
+                    255,
+                    -1,
+                )
+                brow_y0 = max(0, cy - int(eh * 1.1))
+                brow_y1 = max(brow_y0 + 1, cy - int(eh * 0.2))
+                brow_x0 = max(0, cx - int(ew * 0.9))
+                brow_x1 = min(w, cx + int(ew * 0.9))
+                cv2.rectangle(mask, (brow_x0, brow_y0), (brow_x1, brow_y1), 255, -1)
+
+    mask = cv2.GaussianBlur(mask, (21, 21), 0)
+    _, mask = cv2.threshold(mask, 20, 255, cv2.THRESH_BINARY)
+    return mask
+
+
 def roberts_edge(image: np.ndarray, thresh: Optional[float] = None) -> np.ndarray:
     """
     Apply the Roberts Cross edge detector as analogous to MATLAB's edge(..., 'roberts').
@@ -296,60 +395,177 @@ def roberts_edge(image: np.ndarray, thresh: Optional[float] = None) -> np.ndarra
     return binary_edges.astype(np.uint8)
 
 
-def make_line_art_binary(face_bgr: np.ndarray, region_mask: np.ndarray) -> np.ndarray:
-    # 1. Bilateral filter removes skin texture but preserves strong structural edges.
+def require_mediapipe_face_mesh():
+    mpl_dir = Path("/tmp/mediapipe-mpl-cache")
+    xdg_dir = Path("/tmp/mediapipe-xdg-cache")
+    mpl_dir.mkdir(parents=True, exist_ok=True)
+    xdg_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
+    os.environ.setdefault("XDG_CACHE_HOME", str(xdg_dir))
+    os.environ.setdefault("MEDIAPIPE_DISABLE_GPU", "1")
+
+    try:
+        from mediapipe.python.solutions import face_mesh  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "trace-mode 'landmarks' requires mediapipe. Install it with "
+            "'./.venv/bin/python -m pip install -r requirements.txt'."
+        ) from exc
+    return face_mesh
+
+
+def filter_binary_components(
+    binary: np.ndarray,
+    min_area: int,
+    max_area: Optional[int] = None,
+) -> np.ndarray:
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    filtered = np.zeros_like(binary)
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        if max_area is not None and area > max_area:
+            continue
+        filtered[labels == label] = 255
+    return filtered
+
+
+def make_line_art_binary(
+    face_bgr: np.ndarray,
+    region_mask: np.ndarray,
+    feature_mask: np.ndarray,
+    outdir: Path,
+) -> np.ndarray:
     blur_bgr = face_bgr.copy()
-    for _ in range(3):
-        blur_bgr = cv2.bilateralFilter(blur_bgr, d=11, sigmaColor=100, sigmaSpace=100)
-    
-    # 2. Convert to HSV for skin thresholding
-    hsv = cv2.cvtColor(blur_bgr, cv2.COLOR_BGR2HSV)
-    
-    # Define bounds in OpenCV HSV format (H: 0-179, S: 0-255, V: 0-255)
-    lower_hsv1 = np.array([0, 51, 0])
-    upper_hsv1 = np.array([14, 255, 255])
-    
-    lower_hsv2 = np.array([165, 51, 0])
-    upper_hsv2 = np.array([179, 255, 255])
-    
-    mask1 = cv2.inRange(hsv, lower_hsv1, upper_hsv1)
-    mask2 = cv2.inRange(hsv, lower_hsv2, upper_hsv2)
-    skin_mask = cv2.bitwise_or(mask1, mask2)
-    
-    # 3. Combine with original region mask (focus + grabcut)
-    final_mask = cv2.bitwise_and(skin_mask, region_mask)
-    
-    # 4. Extract Face Outline (Silhouette) using Roberts Cross
+    for _ in range(2):
+        blur_bgr = cv2.bilateralFilter(blur_bgr, d=9, sigmaColor=80, sigmaSpace=80)
     gray_blur = cv2.cvtColor(blur_bgr, cv2.COLOR_BGR2GRAY)
-    im_face = cv2.bitwise_and(gray_blur, gray_blur, mask=final_mask)
-    outline_edges = roberts_edge(im_face, thresh=30.0)
-    
-    # 5. Extract Internal Features (Eyes, Nose, Lips) using a "Sketch" effect!
-    # A block adaptive threshold works incredibly well for portrait drawing.
-    gray_original = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
-    gray_light_blur = cv2.medianBlur(gray_original, 5)  # balanced median blur to retain facial geometry
-    
-    # Adaptive threshold creates a pen-sketch effect mimicking lighting shadows.
-    # We strike a perfect balance here to keep the eyes/lips recognizable without overwhelming noise.
-    sketch = cv2.adaptiveThreshold(
-        gray_light_blur, 255,
-        cv2.ADAPTIVE_THRESH_MEAN_C,
-        cv2.THRESH_BINARY_INV,
-        blockSize=21, C=8
+
+    hsv = cv2.cvtColor(blur_bgr, cv2.COLOR_BGR2HSV)
+    lower_hsv1 = np.array([0, 40, 10])
+    upper_hsv1 = np.array([18, 255, 255])
+    lower_hsv2 = np.array([160, 40, 10])
+    upper_hsv2 = np.array([179, 255, 255])
+    skin_mask = cv2.bitwise_or(
+        cv2.inRange(hsv, lower_hsv1, upper_hsv1),
+        cv2.inRange(hsv, lower_hsv2, upper_hsv2),
     )
+    final_mask = cv2.bitwise_and(skin_mask, region_mask)
+
+    outline_source = cv2.bitwise_and(gray_blur, gray_blur, mask=final_mask)
+    outline_edges = roberts_edge(outline_source, thresh=26.0)
+    outline_edges = cv2.morphologyEx(
+        outline_edges,
+        cv2.MORPH_CLOSE,
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    )
+
+    feature_region = cv2.bitwise_and(region_mask, cv2.dilate(feature_mask, np.ones((13, 13), np.uint8)))
+
+    # --- DinjanAI/Image_to_Cartoon Implementation ---
+    # 1. Convert to grayscale and apply median blur to reduce image noise
+    grayimg = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
+    grayimg = cv2.medianBlur(grayimg, 5)
+
+    # 2. Get the edges (DinjanAI uses THRESH_BINARY, making edges black and background white)
+    edges = cv2.adaptiveThreshold(grayimg, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 5, 5)
+
+    # 3. Convert to a cartoon version (heavy bilateral filter + black edges)
+    # DinjanAI parameters: 9, 250, 250
+    color = cv2.bilateralFilter(face_bgr, 9, 250, 250)
+    dinjan_cartoon = cv2.bitwise_and(color, color, mask=edges)
     
-    # Clean up the sketch slightly to remove tiny disconnected specks
-    sketch = cv2.morphologyEx(sketch, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    # We output the cartoonified picture!
+    cv2.imwrite(str(outdir / "cartoon_face.png"), dinjan_cartoon)
+    # ------------------------------------------------
+
+    # For vector tracing, the robotic arm needs the edges to be WHITE (255), so we invert it!
+    edges_inv = cv2.bitwise_not(edges)
     
-    # Erode the bounding mask heavily so the sketch doesn't overlap the silhouette boundary
-    eroded_mask = cv2.erode(final_mask, np.ones((13, 13), np.uint8), iterations=1)
-    internal_features = cv2.bitwise_and(sketch, sketch, mask=eroded_mask)
+    # We apply the trace to the entire face region rather than just the tiny heuristic eye/nose ellipses 
+    # Because DinjanAI filtering is smooth, we actually WANT to trace the hair, beard, and jawline it finds!
+    sketch = cv2.bitwise_and(edges_inv, edges_inv, mask=region_mask)
     
-    # 6. Combine Outline + Internal Features
-    combined = cv2.bitwise_or(outline_edges, internal_features)
-    
-    # Optional thinning or cleanup can happen here, but we leave it thin for extraction
+    # We remove max_area limit here so huge connected structures (like your hair/beard shadows) aren't deleted!
+    sketch = filter_binary_components(
+        sketch,
+        min_area=max(5, face_bgr.shape[0] // 60), # Lower area threshold to preserve thin Dinjan traces
+        max_area=None,
+    )
+
+    combined = cv2.bitwise_or(outline_edges, sketch)
+    combined = cv2.bitwise_and(combined, combined, mask=region_mask)
+    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
     return combined
+
+
+def make_landmark_binary(
+    face_bgr: np.ndarray,
+    region_mask: np.ndarray,
+    feature_mask: np.ndarray,
+) -> np.ndarray:
+    face_mesh_module = require_mediapipe_face_mesh()
+    rgb = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
+
+    try:
+        with face_mesh_module.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+        ) as face_mesh:
+            result = face_mesh.process(rgb)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "NSOpenGLPixelFormat" in message or "kGpuService" in message:
+            raise RuntimeError(
+                "MediaPipe Face Mesh could not initialize in this environment because "
+                "macOS OpenGL services are unavailable. Run '--trace-mode landmarks' "
+                "from a normal desktop terminal session, or use '--trace-mode detailed' "
+                "in headless environments."
+            ) from exc
+        raise
+
+    if not result.multi_face_landmarks:
+        raise RuntimeError(
+            "MediaPipe Face Mesh could not detect a face in the cropped image. "
+            "Try a straighter front-facing photo with better lighting."
+        )
+
+    h, w = face_bgr.shape[:2]
+    points: List[Tuple[int, int]] = []
+    for landmark in result.multi_face_landmarks[0].landmark:
+        x = int(round(landmark.x * (w - 1)))
+        y = int(round(landmark.y * (h - 1)))
+        x = min(max(x, 0), w - 1)
+        y = min(max(y, 0), h - 1)
+        points.append((x, y))
+
+    binary = np.zeros((h, w), dtype=np.uint8)
+    connections = set()
+    connections.update(tuple(sorted(edge)) for edge in face_mesh_module.FACEMESH_CONTOURS)
+    connections.update(tuple(sorted(edge)) for edge in face_mesh_module.FACEMESH_IRISES)
+
+    feature_priority = cv2.dilate(feature_mask, np.ones((7, 7), np.uint8), iterations=1)
+    allowed_mask = cv2.bitwise_or(region_mask, feature_priority)
+    for idx_a, idx_b in connections:
+        ax, ay = points[idx_a]
+        bx, by = points[idx_b]
+        if allowed_mask[ay, ax] == 0 and allowed_mask[by, bx] == 0:
+            continue
+        cv2.line(binary, (ax, ay), (bx, by), 255, 1, cv2.LINE_AA)
+
+    binary = cv2.bitwise_and(binary, binary, mask=allowed_mask)
+    _, binary = cv2.threshold(binary, 32, 255, cv2.THRESH_BINARY)
+    binary = cv2.morphologyEx(
+        binary,
+        cv2.MORPH_CLOSE,
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    )
+    return binary
 
 
 def extract_outline_paths(
@@ -426,11 +642,12 @@ def extract_paths(
     border_margin: int,
     max_paths: int,
     keep_mask: Optional[np.ndarray] = None,
+    priority_mask: Optional[np.ndarray] = None,
 ) -> List[np.ndarray]:
     contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
     h, w = binary.shape[:2]
 
-    kept: List[np.ndarray] = []
+    kept: List[Tuple[float, np.ndarray]] = []
     for contour in contours:
         # Since we are drawing single-pixel wide open lines (not closed polygons),
         # their contourArea is mathematically computed as 0.0. 
@@ -470,10 +687,15 @@ def extract_paths(
         epsilon = max(0.5, epsilon_factor * peri)
         approx = cv2.approxPolyDP(contour, epsilon, closed=False)
         if len(approx) >= 2:
-            kept.append(approx)
+            score = peri
+            if priority_mask is not None:
+                pts = approx[:, 0, :]
+                priority_ratio = float(np.mean(priority_mask[pts[:, 1], pts[:, 0]] > 0))
+                score = peri * (1.0 + 1.1 * priority_ratio) + 12.0 * priority_ratio
+            kept.append((score, approx))
 
-    kept.sort(key=lambda c: cv2.arcLength(c, closed=False), reverse=True)
-    return kept[:max_paths]
+    kept.sort(key=lambda item: item[0], reverse=True)
+    return [contour for _, contour in kept[:max_paths]]
 
 
 def map_paths_to_mm(
@@ -563,7 +785,13 @@ def main() -> None:
 
     region_mask = cv2.bitwise_and(focus_mask, foreground_mask)
     cv2.imwrite(str(outdir / "region_mask.png"), region_mask)
-    keep_mask = cv2.erode(focus_mask, np.ones((21, 21), dtype=np.uint8), iterations=1)
+    feature_mask = build_feature_mask(face_bgr, crop_result.face_bbox)
+    cv2.imwrite(str(outdir / "feature_mask.png"), feature_mask)
+    keep_mask = cv2.bitwise_or(
+        cv2.erode(focus_mask, np.ones((21, 21), dtype=np.uint8), iterations=1),
+        cv2.dilate(feature_mask, np.ones((11, 11), dtype=np.uint8), iterations=1),
+    )
+    keep_mask = cv2.bitwise_and(keep_mask, region_mask)
     cv2.imwrite(str(outdir / "keep_mask.png"), keep_mask)
 
     if args.trace_mode == "outline":
@@ -577,8 +805,8 @@ def main() -> None:
             epsilon_factor=args.epsilon_factor,
             border_margin=args.border_margin,
         )
-    else:
-        binary = make_line_art_binary(face_bgr, region_mask)
+    elif args.trace_mode == "detailed":
+        binary = make_line_art_binary(face_bgr, region_mask, feature_mask, outdir)
         contours = extract_paths(
             binary=binary,
             min_contour_area=args.min_contour_area,
@@ -587,6 +815,19 @@ def main() -> None:
             border_margin=args.border_margin,
             max_paths=args.max_paths,
             keep_mask=keep_mask,
+            priority_mask=feature_mask,
+        )
+    else:
+        binary = make_landmark_binary(face_bgr, region_mask, feature_mask)
+        contours = extract_paths(
+            binary=binary,
+            min_contour_area=args.min_contour_area,
+            min_contour_length=max(8.0, args.min_contour_length * 0.55),
+            epsilon_factor=max(0.0015, args.epsilon_factor * 0.65),
+            border_margin=max(1, args.border_margin // 2),
+            max_paths=min(args.max_paths, 500),
+            keep_mask=region_mask,
+            priority_mask=feature_mask,
         )
 
     cv2.imwrite(str(outdir / "line_art_binary.png"), binary)
@@ -609,6 +850,9 @@ def main() -> None:
     print(f"Focus mask:       {outdir / 'focus_mask.png'}")
     print(f"Foreground mask:  {outdir / 'foreground_mask.png'}")
     print(f"Region mask:      {outdir / 'region_mask.png'}")
+    print(f"Feature mask:     {outdir / 'feature_mask.png'}")
+    if args.trace_mode == "detailed":
+        print(f"Cartoon face:     {outdir / 'cartoon_face.png'}")
     print(f"Keep mask:        {outdir / 'keep_mask.png'}")
     print(f"Debug binary:     {outdir / 'line_art_binary.png'}")
     print(f"Debug overlay:    {outdir / 'vector_overlay.png'}")

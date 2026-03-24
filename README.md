@@ -36,6 +36,16 @@ Detailed tracing (eyes/nose/lips + more interior lines):
 ./.venv/bin/python face_to_vectors.py --outdir output --trace-mode detailed
 ```
 
+`detailed` now biases extraction toward eyes, brows, nose, and mouth so the portrait keeps more of the structure that affects likeness.
+
+Landmark tracing with MediaPipe Face Mesh (best likeness when the dependency is installed):
+
+```bash
+./.venv/bin/python face_to_vectors.py --outdir output --trace-mode landmarks
+```
+
+If you run `landmarks` on macOS and see an OpenGL initialization error, run it from a normal desktop terminal session instead of a headless shell.
+
 ## Main outputs
 
 - `output/paths_mm.json`: vector paths in millimeter coordinates
@@ -43,6 +53,7 @@ Detailed tracing (eyes/nose/lips + more interior lines):
 - `output/focus_mask.png`: face-priority mask
 - `output/foreground_mask.png`: foreground segmentation mask
 - `output/region_mask.png`: combined mask used for edge extraction
+- `output/feature_mask.png`: eyes/nose/mouth priority mask used to preserve facial structure
 - `output/keep_mask.png`: stricter mask used for contour filtering
 - `output/line_art_binary.png`: threshold/edge map used for contour extraction
 - `output/vector_overlay.png`: extracted contours overlay
@@ -76,6 +87,7 @@ Save the cleaned vector set for reuse:
 
 - `--paper-width-mm`, `--paper-height-mm`: target drawing area
 - `--trace-mode`: `outline` (silhouette) or `detailed` (internal features)
+- `--trace-mode landmarks`: use MediaPipe facial landmarks for more face-accurate contours
 - `--min-contour-area`, `--min-contour-length`: remove tiny/noisy paths
 - `--epsilon-factor`: contour simplification amount
 - `--border-margin`: remove contours touching image border (helps kill background lines)
