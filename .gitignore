@@ -19,3 +19,6 @@ output/
 # Temp research repo
 temp_repo/
 .venv/
+
+# Claude Code internals
+.claude/

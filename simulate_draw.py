@@ -33,7 +33,7 @@ class PathStats:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Render paths_mm.json into a simulated drawing image with optional face-focused filtering."
+        description="Render paths_mm.json into a drawing image, with defaults tuned to match vector_overlay closely."
     )
     parser.add_argument(
         "--input",
@@ -77,9 +77,19 @@ def parse_args() -> argparse.Namespace:
         help="Show the rendered image in a window.",
     )
     parser.add_argument(
+        "--filter",
+        action="store_true",
+        help="Apply extra path filtering before rendering.",
+    )
+    parser.add_argument(
         "--no-filter",
         action="store_true",
-        help="Disable the built-in path filter and render every vector path.",
+        help="Compatibility flag. Filtering is disabled by default.",
+    )
+    parser.add_argument(
+        "--overlay-style",
+        action="store_true",
+        help="Render with a black background and green contour lines similar to vector_overlay.png.",
     )
     parser.add_argument(
         "--min-path-length-mm",
@@ -326,6 +336,7 @@ def draw_paths(
     paper_h_mm: float,
     margin_px: int,
     line_width: int,
+    color: Tuple[int, int, int],
 ) -> Tuple[int, float]:
     segment_count = 0
     length_mm = 0.0
@@ -344,7 +355,7 @@ def draw_paths(
             for pt in path
         ]
         for i in range(1, len(path)):
-            cv2.line(image, pts_px[i - 1], pts_px[i], color=(0, 0, 0), thickness=line_width)
+            cv2.line(image, pts_px[i - 1], pts_px[i], color=color, thickness=line_width)
             dx = path[i][0] - path[i - 1][0]
             dy = path[i][1] - path[i - 1][1]
             length_mm += math.hypot(dx, dy)
@@ -365,9 +376,25 @@ def main() -> None:
         raise ValueError("min-keep-paths must be at least 1.")
 
     paper_w_mm, paper_h_mm, source_px, paths = load_paths(args.input)
+    canvas_width = args.canvas_width
+    canvas_height = args.canvas_height
+    margin = args.margin
+    line_width = args.line_width
+    if (
+        source_px is not None
+        and args.canvas_width == 1200
+        and args.canvas_height == 1200
+    ):
+        canvas_width, canvas_height = source_px
+        if args.margin == 40:
+            margin = 0
+        if args.line_width == 2:
+            line_width = 1
+
     original_path_count = len(paths)
     dropped_paths = 0
-    if not args.no_filter:
+    should_filter = args.filter and not args.no_filter
+    if should_filter:
         paths, dropped_paths = filter_paths(
             paths=paths,
             min_path_length_mm=args.min_path_length_mm,
@@ -377,15 +404,21 @@ def main() -> None:
             edge_margin_ratio=args.edge_margin_ratio,
         )
 
-    canvas = np.full((args.canvas_height, args.canvas_width, 3), 255, dtype=np.uint8)
+    if args.overlay_style:
+        canvas = np.zeros((canvas_height, canvas_width, 3), dtype=np.uint8)
+        line_color = (0, 255, 0)
+    else:
+        canvas = np.full((canvas_height, canvas_width, 3), 255, dtype=np.uint8)
+        line_color = (0, 0, 0)
 
     segment_count, length_mm = draw_paths(
         image=canvas,
         paths=paths,
         paper_w_mm=paper_w_mm,
         paper_h_mm=paper_h_mm,
-        margin_px=args.margin,
-        line_width=args.line_width,
+        margin_px=margin,
+        line_width=line_width,
+        color=line_color,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -395,11 +428,14 @@ def main() -> None:
         save_paths_json(args.filtered_json_output, paper_w_mm, paper_h_mm, paths, source_px)
 
     print(f"Input paths: {original_path_count}")
-    if args.no_filter:
+    if not should_filter:
         print("Path filter: disabled")
     else:
         print(f"Filtered paths kept: {len(paths)}")
         print(f"Filtered paths dropped: {dropped_paths}")
+    print(f"Canvas size: {canvas_width}x{canvas_height}")
+    print(f"Margin: {margin}")
+    print(f"Line width: {line_width}")
     print(f"Rendered paths: {len(paths)}")
     print(f"Rendered segments: {segment_count}")
     print(f"Total pen-down length (mm): {length_mm:.2f}")

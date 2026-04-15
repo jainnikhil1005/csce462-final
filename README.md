@@ -60,12 +60,21 @@ Render the vector JSON into a PNG:
 ./.venv/bin/python simulate_draw.py --input output/paths_mm.json --output output/simulated_draw.png
 ```
 
-The renderer now applies a face-focused cleanup pass by default so tiny stray vectors and weak edge clutter are dropped before previewing.
+The renderer now defaults to the original source image size, zero margin, 1-pixel strokes, and no extra filtering so it matches `output/vector_overlay.png` much more closely.
 
 Optional preview window:
 
 ```bash
 ./.venv/bin/python simulate_draw.py --input output/paths_mm.json --output output/simulated_draw.png --show
+```
+
+Render with a black background and green contour lines like the vector overlay:
+
+```bash
+./.venv/bin/python simulate_draw.py \
+  --input output/paths_mm.json \
+  --output output/simulated_draw.png \
+  --overlay-style
 ```
 
 Save the cleaned vector set for reuse:
@@ -88,5 +97,6 @@ Save the cleaned vector set for reuse:
 - `--max-paths`: cap path count for faster drawing
 - `--face-padding`: crop margin around detected face
 - `simulate_draw.py --canvas-width --canvas-height --margin --line-width`: control simulation image size/look
-- `simulate_draw.py --min-path-length-mm --min-path-diagonal-mm --keep-length-ratio`: control how aggressively low-value vector paths are removed
+- `simulate_draw.py --filter --min-path-length-mm --min-path-diagonal-mm --keep-length-ratio`: optionally remove low-value vector paths before rendering
+- `simulate_draw.py --overlay-style`: use a black background and green lines like `vector_overlay.png`
 - `simulate_draw.py --filtered-json-output`: write the cleaned vector paths back to JSON
