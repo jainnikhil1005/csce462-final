@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Webcam index to use for capture (default: 0).",
     )
+    src_group.add_argument(
+        "--pi-camera",
+        action="store_true",
+        help="Use the Raspberry Pi camera (picamera2) instead of a webcam.",
+    )
 
     parser.add_argument(
         "--outdir",
@@ -160,6 +165,32 @@ def capture_image(camera_index: int) -> np.ndarray:
     if captured is None:
         raise RuntimeError("Capture cancelled.")
     return captured
+
+
+def capture_image_picamera(countdown: int = 3) -> np.ndarray:
+    """Capture a single frame from the Raspberry Pi camera using picamera2."""
+    import time
+    from picamera2 import Picamera2  # type: ignore
+
+    picam = Picamera2()
+    # Explicitly request BGR888 so OpenCV receives a 3-channel BGR image directly
+    config = picam.create_still_configuration(main={"size": (1920, 1080), "format": "BGR888"})
+    picam.configure(config)
+    picam.start()
+    time.sleep(0.5)  # let the sensor settle before capturing
+
+    if countdown > 0:
+        print(f"Pi camera ready. Capturing in {countdown} seconds — get in position!")
+        for i in range(countdown, 0, -1):
+            print(f"  {i}...")
+            time.sleep(1)
+
+    frame_bgr = picam.capture_array()
+    picam.stop()
+    picam.close()
+
+    print("Captured.")
+    return frame_bgr
 
 
 def detect_and_crop_face(image_bgr: np.ndarray, padding_frac: float) -> FaceCropResult:
@@ -770,6 +801,9 @@ def main() -> None:
         image_bgr = cv2.imread(str(args.input))
         if image_bgr is None:
             raise FileNotFoundError(f"Unable to read input image: {args.input}")
+    elif getattr(args, "pi_camera", False):
+        image_bgr = capture_image_picamera()
+        cv2.imwrite(str(outdir / "captured.jpg"), image_bgr)
     else:
         image_bgr = capture_image(args.camera_index)
         cv2.imwrite(str(outdir / "captured.jpg"), image_bgr)

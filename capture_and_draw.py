@@ -48,7 +48,6 @@ OUTDIR       = Path("output")
 PATHS_JSON   = OUTDIR / "paths_mm.json"
 TRACE_MODE   = "cartoon"     # cartoon | detailed | outline | landmarks
 PAPER_MM     = 200.0         # drawing area size in mm (square)
-CAMERA_INDEX = 0
 # ============================================================
 
 PointMM = Tuple[float, float]
@@ -68,7 +67,7 @@ def generate_paths() -> List[List[PointMM]]:
         "--trace-mode",      TRACE_MODE,
         "--paper-width-mm",  str(PAPER_MM),
         "--paper-height-mm", str(PAPER_MM),
-        "--camera-index",    str(CAMERA_INDEX),
+        "--pi-camera",
     ]
 
     result = subprocess.run(cmd, text=True)
