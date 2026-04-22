@@ -531,9 +531,9 @@ def make_line_art_binary(
     grayimg = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
     grayimg = cv2.medianBlur(grayimg, 5)
 
-    # 2. Get the edges (DinjanAI uses THRESH_BINARY, making edges black and background white)
-    # We increase blockSize (5 -> 11) and lower C (5 -> 3) so it traces softer, broader shadows (nose/mouth)
-    edges = cv2.adaptiveThreshold(grayimg, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, 3)
+    # 2. Get the edges. Higher C (9) suppresses fine texture noise (beard stubble,
+    #    skin pores, hair strands) and keeps only strong structural edges.
+    edges = cv2.adaptiveThreshold(grayimg, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, 9)
 
     # 3. Convert to a cartoon version (heavy bilateral filter + black edges)
     # DinjanAI parameters: 9, 250, 250
@@ -560,7 +560,9 @@ def make_line_art_binary(
 
     combined = cv2.bitwise_or(outline_edges, sketch)
     combined = cv2.bitwise_and(combined, combined, mask=region_mask)
-    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    # 3x3 open removes isolated noise pixels; then drop small disconnected blobs
+    combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    combined = filter_binary_components(combined, min_area=max(20, face_bgr.shape[0] // 30))
     return combined
 
 
@@ -878,14 +880,14 @@ def main() -> None:
             min_contour_area=args.min_contour_area,
             min_contour_length=max(
                 10.0,
-                args.min_contour_length * (0.75 if args.trace_mode == "cartoon" else 1.0),
+                args.min_contour_length * (2.0 if args.trace_mode == "cartoon" else 1.0),
             ),
             epsilon_factor=max(
-                0.0018,
-                args.epsilon_factor * (0.82 if args.trace_mode == "cartoon" else 1.0),
+                0.003,
+                args.epsilon_factor * (1.2 if args.trace_mode == "cartoon" else 1.0),
             ),
             border_margin=args.border_margin,
-            max_paths=min(args.max_paths, 650) if args.trace_mode == "cartoon" else args.max_paths,
+            max_paths=min(args.max_paths, 350) if args.trace_mode == "cartoon" else args.max_paths,
             keep_mask=keep_mask,
             priority_mask=feature_mask,
         )
