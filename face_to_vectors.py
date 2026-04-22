@@ -174,10 +174,19 @@ def capture_image_picamera(countdown: int = 3) -> np.ndarray:
 
     picam = Picamera2()
     # Explicitly request BGR888 so OpenCV receives a 3-channel BGR image directly
-    config = picam.create_still_configuration(main={"size": (1920, 1080), "format": "BGR888"})
+    config = picam.create_still_configuration(
+        main={"size": (1920, 1080), "format": "BGR888"},
+        controls={
+            "AeEnable": True,
+            "AwbEnable": True,
+            "AeMeteringMode": 0,  # CentreWeighted — expose for the face
+        },
+    )
     picam.configure(config)
     picam.start()
-    time.sleep(0.5)  # let the sensor settle before capturing
+    # Wait for auto-exposure and auto-white-balance to converge.
+    # 0.5 s is far too short — AWB needs at least 1–2 s on the Pi camera.
+    time.sleep(2.0)
 
     if countdown > 0:
         print(f"Pi camera ready. Capturing in {countdown} seconds — get in position!")
@@ -189,7 +198,19 @@ def capture_image_picamera(countdown: int = 3) -> np.ndarray:
     picam.stop()
     picam.close()
 
-    print("Captured.")
+    # Normalise brightness: if the mean luminance is very low the image is
+    # underexposed — apply CLAHE to lift it before any further processing.
+    gray_check = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    mean_lum = float(np.mean(gray_check))
+    if mean_lum < 80:
+        print(f"  [camera] low luminance ({mean_lum:.0f}/255) — applying CLAHE brightness boost.")
+        lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        l_ch = clahe.apply(l_ch)
+        frame_bgr = cv2.cvtColor(cv2.merge([l_ch, a_ch, b_ch]), cv2.COLOR_LAB2BGR)
+
+    print(f"Captured (mean luminance: {mean_lum:.0f}/255).")
     return frame_bgr
 
 
@@ -474,14 +495,20 @@ def make_line_art_binary(
     gray_blur = cv2.cvtColor(blur_bgr, cv2.COLOR_BGR2GRAY)
 
     hsv = cv2.cvtColor(blur_bgr, cv2.COLOR_BGR2HSV)
-    lower_hsv1 = np.array([0, 40, 10])
-    upper_hsv1 = np.array([18, 255, 255])
-    lower_hsv2 = np.array([160, 40, 10])
+    # Wider hue range + much lower saturation floor so dark / poorly-lit
+    # skin tones are still captured (dark faces have low saturation).
+    lower_hsv1 = np.array([0, 10, 10])
+    upper_hsv1 = np.array([25, 255, 255])
+    lower_hsv2 = np.array([155, 10, 10])
     upper_hsv2 = np.array([179, 255, 255])
     skin_mask = cv2.bitwise_or(
         cv2.inRange(hsv, lower_hsv1, upper_hsv1),
         cv2.inRange(hsv, lower_hsv2, upper_hsv2),
     )
+    # If the skin mask is nearly empty (underexposed / monochromatic image),
+    # fall back to the full region mask so outlines are still attempted.
+    if cv2.countNonZero(skin_mask) < 0.05 * region_mask.size:
+        skin_mask = region_mask.copy()
     final_mask = cv2.bitwise_and(skin_mask, region_mask)
 
     outline_source = cv2.bitwise_and(gray_blur, gray_blur, mask=final_mask)
