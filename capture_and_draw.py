@@ -52,6 +52,58 @@ PAPER_MM     = 200.0         # drawing area size in mm (square)
 
 PointMM = Tuple[float, float]
 
+# Maximum gap in mm between path end and next path start before we lift the pen.
+# Paths closer than this are chained together (no pen lift), saving toggle time.
+CHAIN_THRESHOLD_MM = 4.0
+
+
+# ------------------------------------------------------------------
+# PATH OPTIMISER — nearest-neighbour ordering + gap chaining
+# ------------------------------------------------------------------
+
+def optimise_paths(paths: List[List[PointMM]]) -> List[List[PointMM]]:
+    """
+    1. Nearest-neighbour sort: always travel to the closest next path start
+       (considering both the path's natural start and its reversed end).
+    2. Gap chaining: if the gap to the next start is <= CHAIN_THRESHOLD_MM,
+       merge it into the current path (no pen lift needed).
+    Returns an optimised list of paths with fewer lifts and less travel.
+    """
+    if not paths:
+        return paths
+
+    remaining = [list(p) for p in paths]
+    ordered: List[List[PointMM]] = []
+    current_end: PointMM = (0.0, 0.0)  # pen starts at origin
+
+    while remaining:
+        best_idx = 0
+        best_dist = float("inf")
+        best_reversed = False
+
+        for i, path in enumerate(remaining):
+            d_fwd = math.hypot(path[0][0] - current_end[0], path[0][1] - current_end[1])
+            d_rev = math.hypot(path[-1][0] - current_end[0], path[-1][1] - current_end[1])
+            d = min(d_fwd, d_rev)
+            if d < best_dist:
+                best_dist = d
+                best_idx = i
+                best_reversed = d_rev < d_fwd
+
+        next_path = remaining.pop(best_idx)
+        if best_reversed:
+            next_path = list(reversed(next_path))
+
+        # Chain if gap is small enough — append to current last path, no lift
+        if ordered and best_dist <= CHAIN_THRESHOLD_MM:
+            ordered[-1].extend(next_path)
+        else:
+            ordered.append(next_path)
+
+        current_end = ordered[-1][-1]
+
+    return ordered
+
 
 # ------------------------------------------------------------------
 # STEP 1 — Capture face and generate vector paths
@@ -262,6 +314,10 @@ def main() -> None:
     if not paths:
         print("[!] No paths to draw.")
         sys.exit(1)
+
+    print(f"    Optimising {len(paths)} paths (nearest-neighbour + gap chaining)...")
+    paths = optimise_paths(paths)
+    print(f"    Reduced to {len(paths)} paths after chaining (fewer pen lifts).")
 
     confirm(paths)
     draw(paths)
