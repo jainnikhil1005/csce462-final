@@ -1,3 +1,2 @@
 numpy>=1.24,<2
 opencv-contrib-python>=4.11,<4.14
-mediapipe>=0.10
