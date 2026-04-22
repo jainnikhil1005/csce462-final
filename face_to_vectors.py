@@ -531,9 +531,9 @@ def make_line_art_binary(
     grayimg = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
     grayimg = cv2.medianBlur(grayimg, 5)
 
-    # 2. Get the edges. Higher C (9) suppresses fine texture noise (beard stubble,
-    #    skin pores, hair strands) and keeps only strong structural edges.
-    edges = cv2.adaptiveThreshold(grayimg, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, 9)
+    # 2. Get the edges. C=6 is a balance: suppresses fine texture (stubble/pores)
+    #    while keeping structural edges (eyes, nose, lips, jawline).
+    edges = cv2.adaptiveThreshold(grayimg, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, 6)
 
     # 3. Convert to a cartoon version (heavy bilateral filter + black edges)
     # DinjanAI parameters: 9, 250, 250
@@ -880,14 +880,14 @@ def main() -> None:
             min_contour_area=args.min_contour_area,
             min_contour_length=max(
                 10.0,
-                args.min_contour_length * (2.0 if args.trace_mode == "cartoon" else 1.0),
+                args.min_contour_length * (1.3 if args.trace_mode == "cartoon" else 1.0),
             ),
             epsilon_factor=max(
-                0.003,
-                args.epsilon_factor * (1.2 if args.trace_mode == "cartoon" else 1.0),
+                0.002,
+                args.epsilon_factor * (1.0 if args.trace_mode == "cartoon" else 1.0),
             ),
-            border_margin=args.border_margin,
-            max_paths=min(args.max_paths, 350) if args.trace_mode == "cartoon" else args.max_paths,
+            border_margin=args.border_margin * 3 if args.trace_mode == "cartoon" else args.border_margin,
+            max_paths=min(args.max_paths, 500) if args.trace_mode == "cartoon" else args.max_paths,
             keep_mask=keep_mask,
             priority_mask=feature_mask,
         )
