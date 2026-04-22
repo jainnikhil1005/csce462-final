@@ -173,20 +173,24 @@ def capture_image_picamera(countdown: int = 3) -> np.ndarray:
     from picamera2 import Picamera2  # type: ignore
 
     picam = Picamera2()
-    # Explicitly request BGR888 so OpenCV receives a 3-channel BGR image directly
+    # Explicitly request BGR888 so OpenCV receives a 3-channel BGR image directly.
+    # Use spot metering so the camera exposes for the centre (face) not the
+    # bright background/windows.  Fix AWB to "indoor" (4) to avoid the blue
+    # cast caused by mixed fluorescent + daylight in office environments.
     config = picam.create_still_configuration(
         main={"size": (1920, 1080), "format": "BGR888"},
         controls={
             "AeEnable": True,
-            "AwbEnable": True,
-            "AeMeteringMode": 0,  # CentreWeighted — expose for the face
+            "AeMeteringMode": 1,   # Spot — expose for the face, ignore background
+            "ExposureValue": 1.0,  # +1 EV: brighten the face relative to the meter
+            "AwbEnable": False,    # Disable auto-AWB; set gains manually below
+            "ColourGains": (2.2, 1.4),  # (red_gain, blue_gain): warm up / kill blue cast
         },
     )
     picam.configure(config)
     picam.start()
-    # Wait for auto-exposure and auto-white-balance to converge.
-    # 0.5 s is far too short — AWB needs at least 1–2 s on the Pi camera.
-    time.sleep(2.0)
+    # Give AE time to converge on the spot-metered face region.
+    time.sleep(3.0)
 
     if countdown > 0:
         print(f"Pi camera ready. Capturing in {countdown} seconds — get in position!")
@@ -198,19 +202,19 @@ def capture_image_picamera(countdown: int = 3) -> np.ndarray:
     picam.stop()
     picam.close()
 
-    # Normalise brightness: if the mean luminance is very low the image is
-    # underexposed — apply CLAHE to lift it before any further processing.
+    # Always apply CLAHE in LAB space to lift local contrast on the face
+    # regardless of overall brightness — this helps edge detection on all
+    # skin tones and lighting conditions.
     gray_check = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     mean_lum = float(np.mean(gray_check))
-    if mean_lum < 80:
-        print(f"  [camera] low luminance ({mean_lum:.0f}/255) — applying CLAHE brightness boost.")
-        lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
-        l_ch, a_ch, b_ch = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        l_ch = clahe.apply(l_ch)
-        frame_bgr = cv2.cvtColor(cv2.merge([l_ch, a_ch, b_ch]), cv2.COLOR_LAB2BGR)
+    print(f"  [camera] mean luminance: {mean_lum:.0f}/255")
+    lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
+    l_ch, a_ch, b_ch = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    l_ch = clahe.apply(l_ch)
+    frame_bgr = cv2.cvtColor(cv2.merge([l_ch, a_ch, b_ch]), cv2.COLOR_LAB2BGR)
 
-    print(f"Captured (mean luminance: {mean_lum:.0f}/255).")
+    print("Captured.")
     return frame_bgr
 
 
