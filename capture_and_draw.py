@@ -134,9 +134,12 @@ def generate_paths() -> List[List[PointMM]]:
 
 def load_paths(json_path: Path) -> List[List[PointMM]]:
     data = json.loads(json_path.read_text(encoding="utf-8"))
+    half_w = data.get("paper_mm", {}).get("width",  PAPER_MM) / 2.0
+    half_h = data.get("paper_mm", {}).get("height", PAPER_MM) / 2.0
     paths: List[List[PointMM]] = []
     for raw_path in data.get("paths", []):
-        path = [(float(pt["x_mm"]), float(pt["y_mm"])) for pt in raw_path]
+        # Shift so (0,0) is the centre of the paper — place pen at paper centre on startup
+        path = [(float(pt["x_mm"]) - half_w, float(pt["y_mm"]) - half_h) for pt in raw_path]
         if len(path) >= 2:
             paths.append(path)
     return paths
