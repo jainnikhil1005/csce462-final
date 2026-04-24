@@ -185,9 +185,14 @@ def motors_enable(on: bool) -> None:
     GPIO.output(Y_ENA, GPIO.HIGH if on else GPIO.LOW)
 
 
-def pen_toggle() -> None:
+def pen_up() -> None:
+    """Energise the solenoid to lift the pen. Stays HIGH until pen_down() is called."""
     GPIO.output(PEN_PIN, GPIO.HIGH)
-    sleep(PEN_PULSE_S)
+    sleep(PEN_SETTLE_S)
+
+
+def pen_down() -> None:
+    """De-energise the solenoid — spring drops the pen onto the paper."""
     GPIO.output(PEN_PIN, GPIO.LOW)
     sleep(PEN_SETTLE_S)
 
@@ -266,30 +271,31 @@ def draw(paths: List[List[PointMM]]) -> None:
         for i, path in enumerate(paths):
             print(f"  Path {i + 1}/{len(paths)}  ({len(path)} pts)", end="\r")
 
-            # Pen up, travel to start of path
+            # Lift pen and travel to start of path
             if pen_is_down:
-                pen_toggle()
+                pen_up()
                 pen_is_down = False
             pos = move_to(pos, path[0], TRAVEL_SPEED_MM_S)
 
-            # Pen down, draw each segment
-            pen_toggle()
+            # Drop pen and draw each segment
+            pen_down()
             pen_is_down = True
             for pt in path[1:]:
                 pos = move_to(pos, pt, DRAW_SPEED_MM_S)
 
         # Finished — lift pen and return home
         if pen_is_down:
-            pen_toggle()
+            pen_up()
 
         print(f"\n  Returning to origin from ({pos[0]:.1f}, {pos[1]:.1f}) mm ...")
         pos = move_to(pos, (0.0, 0.0), TRAVEL_SPEED_MM_S)
+        pen_down()  # de-energise solenoid when done
         print("  Done!")
 
     except KeyboardInterrupt:
         print("\n[!] Interrupted — lifting pen.")
         if pen_is_down:
-            pen_toggle()
+            pen_up()
 
     finally:
         motors_enable(False)

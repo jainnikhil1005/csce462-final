@@ -44,9 +44,12 @@ def motors_enable(on):
     GPIO.output(Y_ENA, GPIO.HIGH if on else GPIO.LOW)
 
 
-def pen_toggle():
+def pen_up():
     GPIO.output(PEN_PIN, GPIO.HIGH)
-    sleep(PEN_PULSE_S)
+    sleep(PEN_SETTLE_S)
+
+
+def pen_down():
     GPIO.output(PEN_PIN, GPIO.LOW)
     sleep(PEN_SETTLE_S)
 
@@ -119,7 +122,7 @@ def draw_circle(cx, cy, radius, n_segments):
     start_y = cy
     move_to(start_x, start_y, speed_mm_s=SPEED_MM_S * 2)
 
-    pen_toggle()  # pen down
+    pen_down()
 
     for i in range(1, n_segments + 1):
         angle = 2 * math.pi * i / n_segments
@@ -127,7 +130,7 @@ def draw_circle(cx, cy, radius, n_segments):
         y = cy + radius * math.sin(angle)
         move_to(x, y)
 
-    pen_toggle()  # pen up
+    pen_up()
 
 
 def draw_square(cx, cy, side):
@@ -141,10 +144,10 @@ def draw_square(cx, cy, side):
     ]
     print(f"Drawing square: center=({cx},{cy}) mm, side={side} mm")
     move_to(*corners[0], speed_mm_s=SPEED_MM_S * 2)
-    pen_toggle()  # pen down
+    pen_down()
     for corner in corners[1:]:
         move_to(*corner)
-    pen_toggle()  # pen up
+    pen_up()
 
 
 def main():
