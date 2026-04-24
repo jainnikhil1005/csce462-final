@@ -139,9 +139,11 @@ def move_to(
 
 def load_paths(json_path: str) -> List[List[PointMM]]:
     data = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    half_w = data.get("paper_mm", {}).get("width",  200.0) / 2.0
+    half_h = data.get("paper_mm", {}).get("height", 200.0) / 2.0
     paths: List[List[PointMM]] = []
     for raw_path in data.get("paths", []):
-        path = [(float(pt["x_mm"]), float(pt["y_mm"])) for pt in raw_path]
+        path = [(float(pt["x_mm"]) - half_w, float(pt["y_mm"]) - half_h) for pt in raw_path]
         if len(path) >= 2:
             paths.append(path)
     return paths
