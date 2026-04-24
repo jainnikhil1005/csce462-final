@@ -22,7 +22,7 @@ Y_PUL, Y_DIR, Y_ENA = 12, 20, 21
 Y_INVERT = False
 
 PEN_PIN      = 16
-PEN_PULSE_S  = 1.0
+PEN_PULSE_S  = 0.05
 PEN_SETTLE_S = 0.3
 
 # Shape parameters

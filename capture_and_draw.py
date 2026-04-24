@@ -38,7 +38,7 @@ Y_INVERT = False             # set True if Y moves the wrong direction
 
 # Pen toggle — GPIO 16, one 1-second HIGH pulse toggles pen up/down
 PEN_PIN      = 16
-PEN_PULSE_S  = 1.0
+PEN_PULSE_S  = 0.05
 PEN_SETTLE_S = 0.3
 
 # ============================================================
